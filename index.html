@@ -131,6 +131,13 @@ label{display:block;font-weight:600;font-size:13px;margin:0 0 4px}
 .ing{display:grid;grid-template-columns:1fr 70px 70px 38px;gap:6px;margin-bottom:6px}
 .ing button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:20px}
 .steps{white-space:pre-wrap;margin:6px 0 0}
+.rank{flex:none;width:30px;height:30px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font:700 14px/30px var(--font-head);text-align:center}
+.rank.top{background:var(--accent);color:var(--accent-ink)}
+.chips.sub{margin:-4px 0 10px}
+.chip.small{padding:4px 12px;font-size:12px}
+.grp{font:700 12px/1 var(--font-body);text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:16px 0 8px}
+.costbox{background:var(--accent-soft);border-radius:var(--r);padding:12px 14px;margin:14px 0 0}
+.costbox p{margin:0 0 6px}.costbox p:last-child{margin:0}
 .line{display:grid;grid-template-columns:1fr 90px 38px;gap:6px;margin-bottom:6px}
 .line button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:20px}
 ul.plain{list-style:none;margin:6px 0;padding:0}
@@ -163,7 +170,7 @@ ul.plain li{padding:6px 0;border-bottom:1px solid var(--line);display:flex;justi
 <script>
 const COLS=['recipes','orders','stock','money'];
 const S={recipes:[],orders:[],stock:[],money:[],settings:{currency:'₵'}};
-const U={tab:'recipes',q:'',stockF:'all',orderF:'open',month:null};
+const U={tab:'recipes',q:'',stockF:'all',orderF:'open',month:null,custSort:'recent',custPeriod:'all'};
 const LOADED={};let READY=false;
 
 const $=s=>document.querySelector(s);
@@ -243,10 +250,32 @@ function totals(ym){
   rows.forEach(m=>{if(m.type==='in')inn+=m.amount;else if(catGroup(m.cat)==='cost')cost+=m.amount;else over+=m.amount});
   return {rows,inn,cost,over,out:cost+over,left:inn-cost-over};
 }
+const paidOf=o=>o.paidAmount!==undefined?num(o.paidAmount):(o.paid?num(o.total):0);
+const owedOf=o=>Math.max(0,num(o.total)-paidOf(o));
 function syncOrderMoney(o){
-  const mid='order-'+o.id;
-  if(o.paid&&num(o.total)>0)store.put('money',{id:mid,type:'in',cat:'sales',amount:num(o.total),date:o.paidDate||todayISO(),note:'Order: '+o.customer,orderId:o.id});
+  const mid='order-'+o.id,p=paidOf(o);
+  if(p>0)store.put('money',{id:mid,type:'in',cat:'sales',amount:p,date:o.paidDate||todayISO(),note:'Order: '+o.customer+(p<num(o.total)?' (part payment)':''),orderId:o.id});
   else if(S.money.some(m=>m.id===mid))store.del('money',mid);
+}
+const ckey=n=>String(n||'').trim().toLowerCase();
+function customers(){
+  const m={};
+  S.orders.forEach(o=>{const k=ckey(o.customer);if(!k)return;const c=m[k]||(m[k]={key:k,name:o.customer.trim(),orders:[],spent:0,owed:0,handle:'',source:''});c.orders.push(o);c.spent+=paidOf(o);c.owed+=owedOf(o)});
+  return Object.values(m).map(c=>{c.orders.sort((a,b)=>(b.created||b.due||'').localeCompare(a.created||a.due||''));
+    c.orders.forEach(o=>{if(!c.handle&&o.handle)c.handle=o.handle;if(!c.source&&o.source)c.source=o.source});c.last=c.orders[0].created||c.orders[0].due||'';return c})
+    .sort((a,b)=>b.last.localeCompare(a.last));
+}
+function recipeCost(r){
+  let cost=0;const missing=[];
+  (r.ingredients||[]).forEach(i=>{const s=findStock(i.name);if(s&&num(s.unitCost)>0)cost+=num(i.qty)*num(s.unitCost);else missing.push(i.name)});
+  const sv=num(r.servings)||1;return {cost,perPortion:cost/sv,missing,servings:sv};
+}
+const keepPct=()=>Math.min(90,Math.max(1,num(S.settings.keep)||50));
+const suggestPrice=pp=>Math.ceil(pp/(1-keepPct()/100));
+const bucketOf=o=>{if(!o.due)return 'No date';const t=todayISO();if(o.due<t)return 'Overdue';if(o.due===t)return 'Today';const d=new Date();d.setDate(d.getDate()+1);return o.due===d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())?'Tomorrow':'Later'};
+function orderMessage(o){
+  const first=String(o.customer||'').trim().split(/\s+/)[0],paid=paidOf(o),owe=owedOf(o);
+  return `Hi ${first}, your order is confirmed:\n${o.items}\nTotal: ${fmt(o.total)}${paid>0?`\nPaid: ${fmt(paid)}`:''}${owe>0&&paid>0?`\nBalance: ${fmt(owe)}`:''}${o.due?`\nReady by: ${new Date(o.due+'T00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'})}`:''}\nThank you!`;
 }
 
 /* ---------- Sheet (pop-up form) ---------- */
@@ -284,24 +313,44 @@ function vRecipes(){
   ${S.recipes.length?`<div class="field"><input type="search" id="q" placeholder="Search recipes" value="${esc(U.q)}" aria-label="Search recipes"></div>`:''}
   <div class="list">${list.map(r=>{
     const short=(r.ingredients||[]).filter(i=>{const s=findStock(i.name);return s&&s.qty<num(i.qty)});
-    return `<button class="card click" data-act="open-recipe" data-id="${r.id}"><div class="row"><div><h3>${esc(r.name)}</h3><div class="meta">${esc(r.category||'')}${r.servings?' &middot; serves '+esc(r.servings):''} &middot; ${(r.ingredients||[]).length} ingredients</div></div>${short.length?`<span class="pill warn">Short on ${esc(short[0].name)}${short.length>1?' +'+(short.length-1):''}</span>`:''}</div></button>`}).join('')
+    return `<button class="card click" data-act="open-recipe" data-id="${r.id}"><div class="row"><div><h3>${esc(r.name)}</h3><div class="meta">${esc(r.category||'')}${r.servings?' &middot; serves '+esc(r.servings):''} &middot; ${(r.ingredients||[]).length} ingredients${(()=>{const c=recipeCost(r);return c.cost>0?' &middot; costs '+fmt(c.perPortion)+' a portion':''})()}</div></div>${short.length?`<span class="pill warn">Short on ${esc(short[0].name)}${short.length>1?' +'+(short.length-1):''}</span>`:''}</div></button>`}).join('')
     ||(S.recipes.length?empty('No match','Try a different word.'):empty('Your recipe book is empty','Add your first recipe. List its ingredients so stock can update when you cook.'))}</div>`;
+}
+function orderCard(o){
+  const open=o.status!=='Delivered',late=open&&o.due&&o.due<todayISO(),paid=paidOf(o),owe=owedOf(o);
+  const next={New:'Preparing',Preparing:'Ready',Ready:'Delivered'};
+  const payPill=num(o.total)>0&&owe===0?'<span class="pill">Paid</span>':paid>0?`<span class="pill warn">Owes ${fmt(owe)}</span>`:'<span class="pill warn">Not paid</span>';
+  return `<div class="card"><div class="row"><div><h3>${esc(o.customer)}</h3><div class="meta">${esc(o.items)}</div>${o.notes?`<div class="meta">Note: ${esc(o.notes)}</div>`:''}</div><div class="amt">${fmt(o.total)}</div></div>
+  <div class="actions" style="margin-top:10px;align-items:center"><span class="pill ${o.status==='Ready'?'':'plain'}">${esc(o.status)}</span>${o.source?`<span class="pill plain">${esc(o.source)}${o.handle?' '+esc(o.handle):''}</span>`:''}${o.delivery==='Delivery'?'<span class="pill plain">Delivery</span>':''}${payPill}${o.due?`<span class="pill ${late?'bad':'plain'}">${late?'Overdue, ':'Due '}${fmtDate(o.due)}</span>`:''}</div>
+  <div class="actions">${next[o.status]?`<button class="btn small soft" data-act="next-status" data-id="${o.id}">Mark ${next[o.status]}</button>`:''}${owe>0&&num(o.total)>0?`<button class="btn small soft" data-act="mark-paid" data-id="${o.id}">Paid in full</button>`:''}<button class="btn small" data-act="copy" data-text="${esc(orderMessage(o))}">Copy message</button><button class="btn small" data-act="edit-order" data-id="${o.id}">Edit</button></div></div>`;
+}
+function vCustomers(){
+  const all=customers(),top=U.custSort==='top',ym=todayISO().slice(0,7);
+  const seg=`<div class="chips">${[['recent','Recent'],['top','Top spenders']].map(([k,l])=>`<button class="chip small" data-act="cust-sort" data-v="${k}" aria-pressed="${U.custSort===k}">${l}</button>`).join('')}</div>`;
+  const regular=c=>c.orders.length>=3?'<span class="pill">Regular</span>':'';
+  if(!top)return seg+`<div class="list">${all.map(c=>`<button class="card click" data-act="view-customer" data-key="${esc(c.key)}"><div class="row"><div><h3>${esc(c.name)}</h3><div class="meta">${c.orders.length} ${c.orders.length===1?'order':'orders'} &middot; paid ${fmt(c.spent)}${c.source?' &middot; '+esc(c.source):''}${c.handle?' '+esc(c.handle):''}</div></div><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">${c.owed>0?`<span class="pill warn">Owes ${fmt(c.owed)}</span>`:''}${regular(c)}</div></div></button>`).join('')||empty('No customers yet','Customers appear here automatically when you log orders.')}</div>`;
+  const month=U.custPeriod==='month';
+  const ranked=all.map(c=>{const os=month?c.orders.filter(o=>(o.created||o.due||'').startsWith(ym)):c.orders;return {c,os,paid:os.reduce((t,o)=>t+paidOf(o),0)}})
+    .filter(x=>x.os.length&&x.paid>0).sort((a,b)=>b.paid-a.paid||b.os.length-a.os.length).slice(0,20);
+  const per=`<div class="chips sub">${[['month','This month'],['all','All time']].map(([k,l])=>`<button class="chip small" data-act="cust-period" data-v="${k}" aria-pressed="${U.custPeriod===k}">${l}</button>`).join('')}</div>`;
+  return seg+per+`<div class="list">${ranked.map((x,i)=>`<button class="card click" data-act="view-customer" data-key="${esc(x.c.key)}"><div class="row" style="align-items:center"><span class="rank ${i<3?'top':''}">${i+1}</span><div style="flex:1"><h3>${esc(x.c.name)} ${regular(x.c)}</h3><div class="meta">${x.os.length} ${x.os.length===1?'order':'orders'} &middot; last ordered ${fmtDate(x.c.last)}</div></div><div class="amt">${fmt(x.paid)}</div></div></button>`).join('')||empty('No ranking yet',month?'Nobody has paid for an order this month yet.':'Rankings appear once customers have paid for orders.')}</div>${ranked.length?'<p class="meta" style="margin-top:10px">Ranked by what each customer has actually paid.</p>':''}`;
 }
 function vOrders(){
   const open=o=>o.status!=='Delivered';
-  let list=S.orders.filter(o=>U.orderF==='all'||(U.orderF==='open')===open(o));
-  list.sort((a,b)=>U.orderF==='done'?(b.due||'').localeCompare(a.due||''):(a.due||'9').localeCompare(b.due||'9'));
-  const owed=S.orders.filter(o=>!o.paid).reduce((t,o)=>t+num(o.total),0);
-  const next={New:'Preparing',Preparing:'Ready',Ready:'Delivered'};
-  return `<div class="bar"><h2>Customer orders</h2><button class="btn primary" data-act="add-order">Log an order</button></div>
+  const owed=S.orders.reduce((t,o)=>t+owedOf(o),0);
+  const dueNow=S.orders.filter(o=>open(o)&&o.due&&o.due<=todayISO()).length;
+  const head=`<div class="bar"><h2>Customer orders</h2><button class="btn primary" data-act="add-order">Log an order</button></div>
+  ${dueNow>0?`<div class="note"><span><b>${dueNow}</b> ${dueNow===1?'order is':'orders are'} due today or overdue</span></div>`:''}
   ${owed>0?`<div class="note"><span>Customers still owe you <b>${fmt(owed)}</b></span></div>`:''}
-  <div class="chips">${[['open','To do'],['done','Delivered'],['all','All']].map(([k,l])=>`<button class="chip" data-act="order-filter" data-v="${k}" aria-pressed="${U.orderF===k}">${l}</button>`).join('')}</div>
-  <div class="list">${list.map(o=>{
-    const late=open(o)&&o.due&&o.due<todayISO();
-    return `<div class="card"><div class="row"><div><h3>${esc(o.customer)}</h3><div class="meta">${esc(o.items)}</div></div><div class="amt">${fmt(o.total)}</div></div>
-    <div class="actions" style="margin-top:10px;align-items:center"><span class="pill ${o.status==='Ready'?'':'plain'}">${esc(o.status)}</span>${o.source?`<span class="pill plain">${esc(o.source)}</span>`:''}${o.paid?'<span class="pill">Paid</span>':'<span class="pill warn">Not paid</span>'}${o.due?`<span class="pill ${late?'bad':'plain'}">${late?'Overdue, ':'Due '}${fmtDate(o.due)}</span>`:''}</div>
-    <div class="actions">${next[o.status]?`<button class="btn small soft" data-act="next-status" data-id="${o.id}">Mark ${next[o.status]}</button>`:''}${o.paid?'':`<button class="btn small soft" data-act="mark-paid" data-id="${o.id}">Mark paid</button>`}<button class="btn small" data-act="edit-order" data-id="${o.id}">Edit</button></div></div>`}).join('')
-    ||empty(U.orderF==='open'?'Nothing to cook right now':'No orders here','Log an order when a customer asks, so nothing gets forgotten.')}</div>`;
+  <div class="chips">${[['open','To do'],['done','Delivered'],['all','All'],['customers','Customers']].map(([k,l])=>`<button class="chip" data-act="order-filter" data-v="${k}" aria-pressed="${U.orderF===k}">${l}</button>`).join('')}</div>`;
+  if(U.orderF==='customers')return head+vCustomers();
+  const list=S.orders.filter(o=>U.orderF==='all'||(U.orderF==='open')===open(o));
+  list.sort((a,b)=>U.orderF==='open'?(a.due||'9').localeCompare(b.due||'9'):(b.due||'').localeCompare(a.due||''));
+  let body;
+  if(!list.length)body=empty(U.orderF==='open'?'Nothing to cook right now':'No orders here','Log an order when a customer asks, so nothing gets forgotten.');
+  else if(U.orderF==='open')body=['Overdue','Today','Tomorrow','Later','No date'].map(g=>{const l=list.filter(o=>bucketOf(o)===g);return l.length?`<div class="grp">${g}</div><div class="list">${l.map(orderCard).join('')}</div>`:''}).join('');
+  else body=`<div class="list">${list.map(orderCard).join('')}</div>`;
+  return head+body;
 }
 function vStock(){
   const f=U.stockF;
@@ -310,14 +359,14 @@ function vStock(){
   <div class="chips">${[['all','All'],['low','Running low'],['Ingredient','Ingredients'],['Packaging','Packaging']].map(([k,l])=>`<button class="chip" data-act="stock-filter" data-v="${k}" aria-pressed="${f===k}">${l}</button>`).join('')}</div>
   <div class="list">${list.map(s=>{
     const st=stockState(s),pct=Math.max(0,Math.min(100,s.qty/Math.max(s.low*3,s.qty,1)*100));
-    return `<div class="card"><div class="row"><div><h3>${esc(s.name)}</h3><div class="meta">${esc(s.category)} &middot; warn me at ${fmtN(s.low)} ${esc(s.unit)}${s.lastBought?' &middot; restocked '+fmtDate(s.lastBought):''}</div></div><div style="text-align:right"><div class="qty">${fmtN(s.qty)} <span class="meta">${esc(s.unit)}</span></div>${st==='ok'?'':`<span class="pill ${st==='out'?'bad':'warn'}">${st==='out'?'Finished':'Running low'}</span>`}</div></div>
+    return `<div class="card"><div class="row"><div><h3>${esc(s.name)}</h3><div class="meta">${esc(s.category)} &middot; warn me at ${fmtN(s.low)} ${esc(s.unit)}${num(s.unitCost)>0?' &middot; '+fmt(s.unitCost)+' per '+esc(s.unit):''}${s.lastBought?' &middot; restocked '+fmtDate(s.lastBought):''}</div></div><div style="text-align:right"><div class="qty">${fmtN(s.qty)} <span class="meta">${esc(s.unit)}</span></div>${st==='ok'?'':`<span class="pill ${st==='out'?'bad':'warn'}">${st==='out'?'Finished':'Running low'}</span>`}</div></div>
     <div class="meter ${st}"><i style="width:${pct}%"></i></div>
     <div class="actions" style="margin-top:8px"><button class="btn small soft" data-act="update-stock" data-id="${s.id}">Update amount</button><button class="btn small" data-act="edit-stock" data-id="${s.id}">Edit</button></div></div>`}).join('')
     ||empty(f==='low'?'Nothing is running low':'No stock items yet',f==='low'?'You will see items here when they drop to the level you set.':'Add what you keep in your kitchen, and set the level where you want a warning.')}</div>`;
 }
 function vMoney(){
   const t=totals(U.month),cur=U.month===todayISO().slice(0,7);
-  const owed=S.orders.filter(o=>!o.paid).reduce((a,o)=>a+num(o.total),0);
+  const owed=S.orders.reduce((a,o)=>a+owedOf(o),0);
   const mx=Math.max(t.inn,t.out,1);
   const sentence=t.inn===0&&t.out===0?'Nothing recorded for this month yet.':
     t.left>=0?`After paying for everything, you kept <b>${fmt(t.left)}</b>.`:`You spent <b>${fmt(-t.left)}</b> more than you earned.`;
@@ -341,20 +390,29 @@ function recipeForm(r={}){
   const dl=`<datalist id="stocknames">${S.stock.map(s=>`<option value="${esc(s.name)}">`).join('')}</datalist>`;
   sheet(r.id?'Edit recipe':'New recipe',`${dl}
   <div class="field"><label for="f_name">Recipe name</label><input type="text" id="f_name" name="name" required value="${esc(r.name||'')}"></div>
-  <div class="two field"><div><label for="f_category">Type</label>${sel('category',['Main','Starter','Side','Dessert','Bakery','Drink','Sauce','Other'],r.category||'Main')}</div><div><label for="f_servings">Serves</label><input type="number" id="f_servings" name="servings" min="1" value="${esc(r.servings||'')}"></div></div>
+  <div class="two field"><div><label for="f_category">Type</label>${sel('category',['Main','Starter','Side','Dessert','Bakery','Drink','Sauce','Other'],r.category||'Main')}</div><div><label for="f_servings">Portions it makes</label><input type="number" id="f_servings" name="servings" min="1" value="${esc(r.servings||'')}"></div></div>
+  <div class="field"><label for="f_price">What you charge per portion (optional)<span class="hint">Used to show your profit, and to fill in the price when you log an order.</span></label><input type="number" id="f_price" name="price" step="any" min="0" value="${esc(r.price??'')}"></div>
   <div class="field"><label>Ingredients<span class="hint">Pick names from your stock list so the app can take them off stock when you cook.</span></label><div id="ings">${(r.ingredients&&r.ingredients.length?r.ingredients:[{},{},{}]).map(ingRow).join('')}</div><button type="button" class="btn small" data-act="add-ing">Add ingredient</button></div>
   <div class="field"><label for="f_steps">Method</label><textarea id="f_steps" name="steps" rows="6">${esc(r.steps||'')}</textarea></div>
   <div class="field"><label for="f_notes">Notes</label><textarea id="f_notes" name="notes" rows="2" placeholder="Tips, how to plate, allergy info">${esc(r.notes||'')}</textarea></div>`,
   fd=>{
     const n=fd.getAll('in_name'),q=fd.getAll('in_qty'),u=fd.getAll('in_unit');
     const ingredients=n.map((x,i)=>({name:x.trim(),qty:num(q[i]),unit:(u[i]||'').trim()})).filter(i=>i.name);
-    store.put('recipes',{id:r.id,name:fd.get('name').trim(),category:fd.get('category'),servings:fd.get('servings'),ingredients,steps:fd.get('steps'),notes:fd.get('notes'),example:false});
+    store.put('recipes',{id:r.id,name:fd.get('name').trim(),category:fd.get('category'),servings:fd.get('servings'),price:num(fd.get('price')),ingredients,steps:fd.get('steps'),notes:fd.get('notes'),example:false});
     toast('Recipe saved');
   });
 }
 function recipeView(id){
   const r=S.recipes.find(x=>x.id===id);if(!r)return;
   sheet(r.name,`<div class="meta">${esc(r.category||'')}${r.servings?' &middot; serves '+esc(r.servings):''}</div>
+  ${(()=>{
+    const c=recipeCost(r),pr=num(r.price);
+    if(c.cost<=0)return '<div class="costbox"><p><b>What it costs</b></p><p class="meta">Add a price for the ingredients in your Stock tab to see what this recipe costs.</p></div>';
+    const kept=pr>0?(pr-c.perPortion)/pr*100:0;
+    return `<div class="costbox"><p><b>Costs ${fmt(c.cost)}</b> to make, which is <b>${fmt(c.perPortion)}</b> a portion.</p>
+    ${pr>0?`<p>You charge ${fmt(pr)}, so you keep <b>${fmt(pr-c.perPortion)}</b> a portion (${Math.round(kept)}%). <span class="pill ${kept>=keepPct()?'':'warn'}">${kept>=keepPct()?'Good':'Below your target'}</span></p>`:''}
+    <p>To keep ${keepPct()}% of every sale, charge about <b>${fmt(suggestPrice(c.perPortion))}</b> a portion.</p>
+    ${c.missing.length?`<p class="meta">No price yet for ${esc(c.missing.join(', '))}, so the real cost is higher. Gas, rent and other running costs are not included.</p>`:'<p class="meta">Gas, rent and other running costs are not included.</p>'}</div>`})()}
   <h3 style="margin-top:14px;font-size:16px">Ingredients</h3><ul class="plain">${(r.ingredients||[]).map(i=>{const s=findStock(i.name),short=s&&s.qty<i.qty;return `<li><span>${esc(i.name)}${short?` <span class="pill warn">only ${fmtN(s.qty)} ${esc(s.unit)} left</span>`:''}</span><span class="meta">${fmtN(i.qty)} ${esc(i.unit)}</span></li>`}).join('')||'<li class="meta">None listed</li>'}</ul>
   ${r.steps?`<h3 style="margin-top:14px;font-size:16px">Method</h3><p class="steps">${esc(r.steps)}</p>`:''}
   ${r.notes?`<h3 style="margin-top:14px;font-size:16px">Notes</h3><p class="steps">${esc(r.notes)}</p>`:''}
@@ -377,24 +435,34 @@ function takeStockForOrder(o){
   return Object.keys(need).length;
 }
 function orderForm(o={}){
-  sheet(o.id?'Edit order':'Log an order',`
-  <div class="field"><label for="f_customer">Customer name</label><input type="text" id="f_customer" name="customer" required value="${esc(o.customer||'')}"></div>
-  <div class="field"><label for="f_source">Where did the order come from?</label>${sel('source',['Snapchat','WhatsApp','Instagram','TikTok','Phone call','Other'],o.source||'Snapchat')}</div>
+  const dl=`<datalist id="custnames">${customers().map(c=>`<option value="${esc(c.name)}">`).join('')}</datalist>`;
+  sheet(o.id?'Edit order':'Log an order',`${dl}
+  <div class="field"><label for="f_customer">Customer name</label><input type="text" id="f_customer" name="customer" list="custnames" autocomplete="off" required value="${esc(o.customer||'')}"></div>
+  <div class="two field"><div><label for="f_source">Where from?</label>${sel('source',['Snapchat','WhatsApp','Instagram','TikTok','Phone call','Other'],o.source||'Snapchat')}</div><div><label for="f_handle">Their name or number there<span class="hint">Optional</span></label><input type="text" id="f_handle" name="handle" value="${esc(o.handle||'')}"></div></div>
   <div class="field"><label for="f_items">What did they order?</label><textarea id="f_items" name="items" required rows="2" placeholder="e.g. Jollof with chicken x3, fried rice x2">${esc(o.items||'')}</textarea></div>
-  ${S.recipes.length?`<div class="field"><label>Which of your recipes? (optional)<span class="hint">Add them and the ingredients come off your stock when you start cooking.</span></label><div id="lines">${(o.lines||[]).map(lineRow).join('')}</div><button type="button" class="btn small" data-act="add-line">Add a recipe</button></div>`:''}
-  <div class="two field"><div><label for="f_total">Price</label><input type="number" id="f_total" name="total" step="any" min="0" required value="${esc(o.total??'')}"></div><div><label for="f_due">Needed by</label><input type="date" id="f_due" name="due" value="${esc(o.due||'')}"></div></div>
-  <div class="field"><label for="f_status">Progress</label>${sel('status',['New','Preparing','Ready','Delivered'],o.status||'New')}</div>
-  <div class="field"><label class="check"><input type="checkbox" name="paid" ${o.paid?'checked':''}> Customer has paid</label><span class="hint">When paid, the money is added to your Money tab automatically.</span></div>
+  ${S.recipes.length?`<div class="field"><label>Which of your recipes? (optional)<span class="hint">Add them to take ingredients off stock when you start cooking, and to work out the price.</span></label><div id="lines">${(o.lines||[]).map(lineRow).join('')}</div><div class="actions" style="margin-top:6px"><button type="button" class="btn small" data-act="add-line">Add a recipe</button><button type="button" class="btn small soft" data-act="calc-total">Work out the price</button></div></div>`:''}
+  <div class="two field"><div><label for="f_total">Total price</label><input type="number" id="f_total" name="total" step="any" min="0" required value="${esc(o.total??'')}"></div><div><label for="f_due">Needed by</label><input type="date" id="f_due" name="due" value="${esc(o.due||'')}"></div></div>
+  <div class="field"><label for="f_paid">Paid so far<span class="hint">A deposit counts. It is added to Money in for you.</span></label><div style="display:flex;gap:8px"><input type="number" id="f_paid" name="paid" step="any" min="0" value="${esc(o.id||o.total?paidOf(o)||'':'')}"><button type="button" class="btn small" data-act="paid-full" style="white-space:nowrap">Paid in full</button></div></div>
+  <div class="two field"><div><label for="f_status">Progress</label>${sel('status',['New','Preparing','Ready','Delivered'],o.status||'New')}</div><div><label for="f_delivery">Pickup or delivery</label>${sel('delivery',['Pickup','Delivery'],o.delivery||'Pickup')}</div></div>
+  <div class="field"><label for="f_notes">Notes (optional)</label><input type="text" id="f_notes" name="notes" placeholder="Allergies, address, no pepper..." value="${esc(o.notes||'')}"></div>
   ${o.id?`<div class="actions"><button type="button" class="btn danger small" data-act="del" data-col="orders" data-id="${o.id}">Delete order</button></div>`:''}`,
   fd=>{
-    const paid=!!fd.get('paid');
     const rn=fd.getAll('ln_recipe'),pn=fd.getAll('ln_portions');
     const lines=rn.map((r,i)=>({recipeId:r,portions:num(pn[i])||1})).filter(l=>l.recipeId);
-    const rec={id:o.id||uid(),customer:fd.get('customer').trim(),source:fd.get('source'),items:fd.get('items').trim(),lines,stockTaken:!!o.stockTaken,total:num(fd.get('total')),due:fd.get('due'),status:fd.get('status'),paid,paidDate:paid?(o.paidDate||todayISO()):'',example:false};
+    const total=num(fd.get('total')),paidAmount=num(fd.get('paid'));
+    const rec={id:o.id||uid(),created:o.created||todayISO(),customer:fd.get('customer').trim(),source:fd.get('source'),handle:fd.get('handle').trim(),items:fd.get('items').trim(),lines,stockTaken:!!o.stockTaken,total,due:fd.get('due'),status:fd.get('status'),delivery:fd.get('delivery'),notes:fd.get('notes').trim(),paidAmount,paid:total>0&&paidAmount>=total,paidDate:paidAmount!==paidOf(o)?todayISO():(o.paidDate||''),example:false};
     let msg='Order saved';
     if(rec.status!=='New'&&!rec.stockTaken&&lines.length){if(takeStockForOrder(rec))msg='Order saved. Ingredients taken off stock.';rec.stockTaken=true}
     store.put('orders',rec);syncOrderMoney(rec);toast(msg);
   });
+}
+function customerView(key){
+  const c=customers().find(x=>x.key===key);if(!c)return;
+  const first=c.name.split(/\s+/)[0];
+  sheet(c.name,`<div class="meta">${c.orders.length} ${c.orders.length===1?'order':'orders'} &middot; paid ${fmt(c.spent)}${c.source?' &middot; '+esc(c.source):''}${c.handle?' '+esc(c.handle):''}</div>
+  ${c.owed>0?`<p style="margin:8px 0 0"><span class="pill warn">Owes ${fmt(c.owed)}</span></p>`:''}
+  <ul class="plain">${c.orders.map(o=>`<li><span style="min-width:0">${esc(o.items)}<br><span class="meta">${fmtDate(o.created||o.due)} &middot; ${esc(o.status)}</span></span><span class="amt">${fmt(o.total)}</span></li>`).join('')}</ul>
+  <div class="actions"><button type="button" class="btn primary" data-act="new-order-for" data-key="${esc(c.key)}">New order for ${esc(first)}</button></div>`,null);
 }
 function stockForm(s={}){
   sheet(s.id?'Edit stock item':'New stock item',`
@@ -402,20 +470,21 @@ function stockForm(s={}){
   <div class="two field"><div><label for="f_category">Kind</label>${sel('category',['Ingredient','Packaging'],s.category||'Ingredient')}</div><div><label for="f_unit">Counted in</label><input type="text" id="f_unit" name="unit" required value="${esc(s.unit||'')}" placeholder="kg, packs, pieces"></div></div>
   <div class="two field"><div><label for="f_qty">How much you have now</label><input type="number" id="f_qty" name="qty" step="any" min="0" required value="${esc(s.qty??'')}"></div>
   <div><label for="f_low">Warn me at or below<span class="hint">Pick the amount where you would want to reorder.</span></label><input type="number" id="f_low" name="low" step="any" min="0" required value="${esc(s.low??'')}"></div></div>
+  <div class="field"><label for="f_unitCost">Price for one unit (optional)<span class="hint">What you pay for one kg, pack or piece. It is used to work out what your recipes cost.</span></label><input type="number" id="f_unitCost" name="unitCost" step="any" min="0" value="${esc(s.unitCost??'')}"></div>
   ${s.id?`<div class="actions"><button type="button" class="btn danger small" data-act="del" data-col="stock" data-id="${s.id}">Delete item</button></div>`:''}`,
-  fd=>{store.put('stock',{id:s.id,name:fd.get('name').trim(),category:fd.get('category'),unit:fd.get('unit').trim(),qty:num(fd.get('qty')),low:num(fd.get('low')),lastBought:s.lastBought||'',example:false});toast('Saved')});
+  fd=>{store.put('stock',{id:s.id,name:fd.get('name').trim(),category:fd.get('category'),unit:fd.get('unit').trim(),qty:num(fd.get('qty')),low:num(fd.get('low')),unitCost:num(fd.get('unitCost')),lastBought:s.lastBought||'',example:false});toast('Saved')});
 }
 function updateStockForm(id){
   const s=S.stock.find(x=>x.id===id);if(!s)return;
   sheet(s.name,`<p class="meta" style="margin-top:0">You have <b>${fmtN(s.qty)} ${esc(s.unit)}</b> now.</p>
   <div class="field"><label for="f_mode">What happened?</label><select name="mode" id="f_mode"><option value="add">I bought more</option><option value="use">I used some</option><option value="set">Set the exact amount (after counting)</option></select></div>
   <div class="field"><label for="f_amount">Amount (${esc(s.unit)})</label><input type="number" id="f_amount" name="amount" step="any" min="0" required></div>
-  <div class="field"><label for="f_cost">What did it cost? (optional)<span class="hint">If you fill this in, it is added to Money out for you.</span></label><input type="number" id="f_cost" name="cost" step="any" min="0"></div>`,
+  <div class="field"><label for="f_cost">What did it cost in total? (optional)<span class="hint">Added to Money out for you, and used to work out what your recipes cost.</span></label><input type="number" id="f_cost" name="cost" step="any" min="0"></div>`,
   fd=>{
     const a=num(fd.get('amount')),m=fd.get('mode');
     const qty=m==='add'?s.qty+a:m==='use'?Math.max(0,s.qty-a):a;
-    store.put('stock',{...s,qty:+qty.toFixed(3),lastBought:m==='add'?todayISO():(s.lastBought||'')});
     const c=num(fd.get('cost'));
+    store.put('stock',{...s,qty:+qty.toFixed(3),lastBought:m==='add'?todayISO():(s.lastBought||''),unitCost:(m==='add'&&c>0&&a>0)?+(c/a).toFixed(2):num(s.unitCost)});
     if(m==='add'&&c>0)store.put('money',{type:'out',cat:s.category==='Packaging'?'pack':'food',amount:c,date:todayISO(),note:'Bought '+fmtN(a)+' '+s.unit+' '+s.name});
     toast('Stock updated');
   });
@@ -437,10 +506,11 @@ function shoppingList(){
 function settingsForm(){
   const perm=('Notification' in window)?Notification.permission:'unsupported';
   sheet('Settings',`<div class="field"><label for="f_currency">Money symbol<span class="hint">Shown before every amount. It is set to &#8373; (Ghana cedi) now.</span></label><input type="text" id="f_currency" name="currency" maxlength="4" value="${esc(S.settings.currency||'')}"></div>
+  <div class="field"><label for="f_keep">Profit I want to keep from each sale (%)<span class="hint">Used to suggest a price for each recipe. Half (50) is a good start.</span></label><input type="number" id="f_keep" name="keep" min="1" max="90" value="${esc(S.settings.keep||50)}"></div>
   <div class="field"><label>Low-stock alerts</label><p class="meta" style="margin:0 0 8px">${perm==='granted'?'Alerts are on. You get a notification when something drops to your warn level.':perm==='denied'?'Alerts are blocked. Open iPhone Settings, then Notifications, then BiteMATE.':'Alerts are off.'}</p>${perm==='granted'?'<button type="button" class="btn small" data-act="test-alert">Send a test alert</button>':perm==='default'?'<button type="button" class="btn small primary" data-act="enable-alerts">Turn on alerts</button>':''}</div>
   <div class="field"><label>Back up your data</label><p class="meta" style="margin:0 0 8px">Everything is stored on this phone. Save a backup now and then, and keep it in Files or iCloud.</p><div class="actions" style="margin:0"><button type="button" class="btn small" data-act="backup">Save a backup</button></div></div>
   <div class="field"><label for="restoreFile">Restore from a backup<span class="hint">This replaces what is on this phone now.</span></label><input type="file" id="restoreFile" accept="application/json,.json"></div>`,
-  fd=>{S.settings.currency=fd.get('currency').trim();store.putSettings()});
+  fd=>{S.settings.currency=fd.get('currency').trim();S.settings.keep=Math.min(90,Math.max(1,num(fd.get('keep'))||50));store.putSettings()});
 }
 
 /* ---------- Events ---------- */
@@ -461,8 +531,14 @@ document.addEventListener('click',e=>{
     case 'add-order':orderForm();break;
     case 'edit-order':orderForm(byId('orders',id));break;
     case 'order-filter':U.orderF=t.dataset.v;render();break;
+    case 'cust-sort':U.custSort=t.dataset.v;render();break;
+    case 'cust-period':U.custPeriod=t.dataset.v;render();break;
+    case 'view-customer':customerView(t.dataset.key);break;
+    case 'new-order-for':{const c=customers().find(x=>x.key===t.dataset.key);closeSheet();orderForm({customer:c?c.name:'',source:c?c.source:'',handle:c?c.handle:''});break}
+    case 'paid-full':{const f=$('#f_total'),p=$('#f_paid');if(f&&p&&f.value)p.value=f.value;break}
+    case 'calc-total':{let tot=0,any=false;document.querySelectorAll('#lines .line').forEach(r=>{const rc=S.recipes.find(x=>x.id===r.querySelector('select').value),n=num(r.querySelector('input').value)||1;if(rc&&num(rc.price)>0){tot+=num(rc.price)*n;any=true}});if(any){$('#f_total').value=+tot.toFixed(2);toast('Price worked out from your recipes')}else toast('Add a recipe that has a price first');break}
     case 'next-status':{const o=byId('orders',id),n={New:'Preparing',Preparing:'Ready',Ready:'Delivered'}[o.status];const upd={...o,status:n};let msg='';if(!o.stockTaken&&(o.lines||[]).length){if(takeStockForOrder(o))msg='Ingredients taken off stock';upd.stockTaken=true}store.put('orders',upd);if(msg)toast(msg);break}
-    case 'mark-paid':{const o={...byId('orders',id),paid:true,paidDate:todayISO()};store.put('orders',o);syncOrderMoney(o);toast('Added to Money in');break}
+    case 'mark-paid':{const o0=byId('orders',id),o={...o0,paid:true,paidAmount:num(o0.total),paidDate:todayISO()};store.put('orders',o);syncOrderMoney(o);toast('Added to Money in');break}
     case 'add-stock':stockForm();break;
     case 'edit-stock':stockForm(byId('stock',id));break;
     case 'update-stock':updateStockForm(id);break;
@@ -484,6 +560,7 @@ document.addEventListener('click',e=>{
   }
 });
 document.addEventListener('change',e=>{
+  if(e.target.id==='f_customer'){const c=customers().find(x=>x.key===ckey(e.target.value));if(c){const h=$('#f_handle'),so=$('#f_source');if(h&&!h.value)h.value=c.handle;if(so&&c.source)so.value=c.source}}
   if(e.target.id!=='restoreFile'||!e.target.files[0])return;
   e.target.files[0].text().then(t=>{const d=JSON.parse(t);if(!COLS.every(c=>Array.isArray(d[c])))throw 0;COLS.forEach(c=>S[c]=d[c]);S.settings={...S.settings,...(d.settings||{})};store.saveLocal();closeSheet();checkAlerts(true);render();toast('Backup restored')}).catch(()=>toast('That file is not a BiteMATE backup'));
 });
