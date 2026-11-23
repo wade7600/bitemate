@@ -1,4 +1,4 @@
-const CACHE='bitemate-v65';
+const CACHE='bitemate-v66';
 const FILES=['./','index.html','manifest.webmanifest','icon-192.png','icon-512.png','apple-touch-icon.png','startup-1206x2622.png','photos/p1.webp','photos/p2.webp','photos/p3.webp','photos/p4.webp','photos/p5.webp','photos/p6.webp','photos/p7.webp','photos/p8.webp','photos/p9.webp','photos/p10.webp','photos/p11.webp'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
